@@ -251,7 +251,7 @@ class ConnectionRenderer(BaseRenderer):
         Returns:
             str: Catalog rendered as yaml.
         """
-        return yaml.dump(catalog, Dumper=CatalogDumper, default_flow_style=False)
+        return yaml.dump(catalog.to_dict(), Dumper=CatalogDumper, default_flow_style=False)
 
     def _render(self) -> str:
         yaml_catalog = self.catalog_to_yaml(self.source.catalog)

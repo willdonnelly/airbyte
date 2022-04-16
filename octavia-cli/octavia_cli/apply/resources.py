@@ -5,6 +5,7 @@
 import abc
 import os
 import time
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Callable, Optional, Union
 
@@ -12,26 +13,28 @@ import airbyte_api_client
 import yaml
 from airbyte_api_client.api import connection_api, destination_api, source_api
 from airbyte_api_client.model.airbyte_catalog import AirbyteCatalog
+from airbyte_api_client.model.airbyte_stream import AirbyteStream
+from airbyte_api_client.model.airbyte_stream_and_configuration import AirbyteStreamAndConfiguration
+from airbyte_api_client.model.airbyte_stream_configuration import AirbyteStreamConfiguration
 from airbyte_api_client.model.connection_create import ConnectionCreate
 from airbyte_api_client.model.connection_id_request_body import ConnectionIdRequestBody
 from airbyte_api_client.model.connection_read import ConnectionRead
-from airbyte_api_client.model.connection_read_list import ConnectionReadList
-from airbyte_api_client.model.connection_search import ConnectionSearch
+from airbyte_api_client.model.connection_schedule import ConnectionSchedule
 from airbyte_api_client.model.connection_status import ConnectionStatus
 from airbyte_api_client.model.connection_update import ConnectionUpdate
 from airbyte_api_client.model.destination_create import DestinationCreate
 from airbyte_api_client.model.destination_id_request_body import DestinationIdRequestBody
 from airbyte_api_client.model.destination_read import DestinationRead
-from airbyte_api_client.model.destination_read_list import DestinationReadList
-from airbyte_api_client.model.destination_search import DestinationSearch
+from airbyte_api_client.model.destination_sync_mode import DestinationSyncMode
 from airbyte_api_client.model.destination_update import DestinationUpdate
+from airbyte_api_client.model.namespace_definition_type import NamespaceDefinitionType
+from airbyte_api_client.model.resource_requirements import ResourceRequirements
 from airbyte_api_client.model.source_create import SourceCreate
 from airbyte_api_client.model.source_discover_schema_request_body import SourceDiscoverSchemaRequestBody
 from airbyte_api_client.model.source_id_request_body import SourceIdRequestBody
 from airbyte_api_client.model.source_read import SourceRead
-from airbyte_api_client.model.source_read_list import SourceReadList
-from airbyte_api_client.model.source_search import SourceSearch
 from airbyte_api_client.model.source_update import SourceUpdate
+from airbyte_api_client.model.sync_mode import SyncMode
 from click import ClickException
 
 from .diff_helpers import compute_diff, hash_config
@@ -157,14 +160,14 @@ class BaseResource(abc.ABC):
 
     @property
     @abc.abstractmethod
-    def search_function_name(
+    def get_function_name(
         self,
     ):  # pragma: no cover
         pass
 
     @property
     @abc.abstractmethod
-    def search_payload(
+    def get_payload(
         self,
     ):  # pragma: no cover
         pass
@@ -203,7 +206,7 @@ class BaseResource(abc.ABC):
         """
         self._create_fn = getattr(self.api, self.create_function_name)
         self._update_fn = getattr(self.api, self.update_function_name)
-        self._search_fn = getattr(self.api, self.search_function_name)
+        self._get_fn = getattr(self.api, self.get_function_name)
         self.workspace_id = workspace_id
         self.local_configuration = local_configuration
         self.configuration_path = configuration_path
@@ -213,7 +216,7 @@ class BaseResource(abc.ABC):
 
     @property
     def remote_resource(self):
-        return self._get_remote_resource()
+        return self._get_remote_resource() if self.state else None
 
     def _get_comparable_configuration(
         self,
@@ -251,13 +254,13 @@ class BaseResource(abc.ABC):
             return self.local_configuration.get(name)
         raise AttributeError(f"{self.__class__.__name__}.{name} is invalid.")
 
-    def _search(self, check_return_type=True) -> Union[SourceReadList, DestinationReadList, ConnectionReadList]:
+    def _get_remote_resource(self) -> Union[SourceRead, DestinationRead, ConnectionRead]:
         """Run search of a resources on the remote Airbyte instance.
 
         Returns:
             Union[SourceReadList, DestinationReadList, ConnectionReadList]: Search results
         """
-        return self._search_fn(self.api_instance, self.search_payload, _check_return_type=check_return_type)
+        return self._get_fn(self.api_instance, self.get_payload)
 
     def _get_state_from_file(self) -> Optional[ResourceState]:
         """Retrieve a state object from a local YAML file if it exists.
@@ -268,23 +271,6 @@ class BaseResource(abc.ABC):
         expected_state_path = Path(os.path.join(os.path.dirname(self.configuration_path), "state.yaml"))
         if expected_state_path.is_file():
             return ResourceState.from_file(expected_state_path)
-
-    def _get_remote_resource(self) -> Optional[Union[SourceRead, DestinationRead, ConnectionRead]]:
-        """Find the remote resource on the Airbyte instance associated with the current resource.
-
-        Raises:
-            DuplicateResourceError: raised if the search results return multiple resources.
-
-        Returns:
-            Optional[Union[SourceRead, DestinationRead, ConnectionRead]]: The remote resource found.
-        """
-        search_results = self._search().get(f"{self.resource_type}s", [])
-        if len(search_results) > 1:
-            raise DuplicateResourceError("Two or more ressources exist with the same name.")
-        if len(search_results) == 1:
-            return search_results[0]
-        else:
-            return None
 
     def get_diff_with_remote_resource(self) -> str:
         """Compute the diff between current resource and the remote resource.
@@ -380,7 +366,7 @@ class Source(BaseResource):
     create_function_name = "create_source"
     resource_id_field = "source_id"
     ResourceIdRequestBody = SourceIdRequestBody
-    search_function_name = "search_sources"
+    get_function_name = "get_source"
     update_function_name = "update_source"
     resource_type = "source"
 
@@ -389,11 +375,9 @@ class Source(BaseResource):
         return SourceCreate(self.definition_id, self.configuration, self.workspace_id, self.resource_name)
 
     @property
-    def search_payload(self):
-        if self.state is None:
-            return SourceSearch(source_definition_id=self.definition_id, workspace_id=self.workspace_id, name=self.resource_name)
-        else:
-            return SourceSearch(source_definition_id=self.definition_id, workspace_id=self.workspace_id, source_id=self.state.resource_id)
+    def get_payload(self):
+        if self.state is not None:
+            return SourceIdRequestBody(self.state.resource_id)
 
     @property
     def update_payload(self):
@@ -428,7 +412,7 @@ class Source(BaseResource):
         Returns:
             AirbyteCatalog: The catalog issued by schema discovery.
         """
-        schema = self.api_instance.discover_schema_for_source(self.source_discover_schema_request_body, _check_return_type=False)
+        schema = self.api_instance.discover_schema_for_source(self.source_discover_schema_request_body)
         return schema.catalog
 
 
@@ -438,7 +422,7 @@ class Destination(BaseResource):
     create_function_name = "create_destination"
     resource_id_field = "destination_id"
     ResourceIdRequestBody = DestinationIdRequestBody
-    search_function_name = "search_destinations"
+    get_function_name = "get_destination"
     update_function_name = "update_destination"
     resource_type = "destination"
 
@@ -452,17 +436,13 @@ class Destination(BaseResource):
         return DestinationCreate(self.workspace_id, self.resource_name, self.definition_id, self.configuration)
 
     @property
-    def search_payload(self) -> DestinationSearch:
+    def get_payload(self) -> DestinationRead:
         """Defines the payload to search the remote resource. Search by resource name if no state found, otherwise search by resource id found in the state.
         Returns:
             DestinationSearch: The DestinationSearch model instance
         """
-        if self.state is None:
-            return DestinationSearch(destination_definition_id=self.definition_id, workspace_id=self.workspace_id, name=self.resource_name)
-        else:
-            return DestinationSearch(
-                destination_definition_id=self.definition_id, workspace_id=self.workspace_id, destination_id=self.state.resource_id
-            )
+        if self.state is not None:
+            return DestinationIdRequestBody(self.state.resource_id)
 
     @property
     def update_payload(self) -> DestinationUpdate:
@@ -488,7 +468,7 @@ class Connection(BaseResource):
     create_function_name = "create_connection"
     resource_id_field = "connection_id"
     ResourceIdRequestBody = ConnectionIdRequestBody
-    search_function_name = "search_connections"
+    get_function_name = "get_connection"
     update_function_name = "update_connection"
     resource_type = "connection"
 
@@ -507,17 +487,13 @@ class Connection(BaseResource):
         return ConnectionCreate(**self.configuration, _check_type=False, _spec_property_naming=True)
 
     @property
-    def search_payload(self) -> ConnectionSearch:
-        """Defines the payload to search the remote connection. Search by connection name if no state found, otherwise search by connection id found in the state.
+    def get_payload(self) -> ConnectionRead:
+        """Defines the payload to search the remote resource. Search by resource name if no state found, otherwise search by resource id found in the state.
         Returns:
-            ConnectionSearch: The ConnectionSearch model instance
+            DestinationSearch: The DestinationSearch model instance
         """
-        if self.state is None:
-            return ConnectionSearch(
-                source_id=self.source_id, destination_id=self.destination_id, name=self.resource_name, status=self.status
-            )
-        else:
-            return ConnectionSearch(connection_id=self.state.resource_id, source_id=self.source_id, destination_id=self.destination_id)
+        if self.state is not None:
+            return ConnectionIdRequestBody(self.state.resource_id)
 
     @property
     def update_payload(self) -> ConnectionUpdate:
@@ -528,14 +504,13 @@ class Connection(BaseResource):
         """
         return ConnectionUpdate(
             connection_id=self.resource_id,
-            sync_catalog=self.configuration["syncCatalog"],
-            status=self.configuration["status"],
-            namespace_definition=self.configuration["namespaceDefinition"],
-            namespace_format=self.configuration["namespaceFormat"],
+            sync_catalog=self.configured_catalog,
+            status=ConnectionStatus(self.configuration["status"]),
+            namespace_definition=NamespaceDefinitionType(self.configuration["namespace_definition"]),
+            namespace_format=self.configuration["namespace_format"],
             prefix=self.configuration["prefix"],
-            schedule=self.configuration["schedule"],
-            resource_requirements=self.configuration["resourceRequirements"],
-            _check_type=False,
+            schedule=ConnectionSchedule(**self.configuration["schedule"]),
+            resource_requirements=ResourceRequirements(**self.configuration["resource_requirements"]),
         )
 
     def create(self) -> dict:
@@ -548,13 +523,26 @@ class Connection(BaseResource):
             self._update_fn, self.update_payload, _check_return_type=False
         )  # Disable check_return_type as the returned payload does not match the open api spec.
 
-    def _search(self, check_return_type=True) -> dict:
-        return self._search_fn(self.api_instance, self.search_payload, _check_return_type=False)
-
     def _get_comparable_configuration(self) -> dict:
-        keys_to_filter_out = ["connectionId", "operationIds"]
+        keys_to_filter_out = ["connection_id", "operation_ids"]
         comparable_configuration = super()._get_comparable_configuration()
-        return {k: v for k, v in comparable_configuration.items() if k not in keys_to_filter_out}
+        return {k: v for k, v in comparable_configuration.to_dict().items() if k not in keys_to_filter_out}
+
+    @property
+    def configured_catalog(self):
+        streams = deepcopy(self.configuration["sync_catalog"]["streams"])
+        streams_and_configurations = []
+        for stream in streams:
+            stream["stream"]["supported_sync_modes"] = [SyncMode(sm) for sm in stream["stream"]["supported_sync_modes"]]
+            stream["config"]["sync_mode"] = SyncMode(stream["config"]["sync_mode"])
+            stream["config"]["destination_sync_mode"] = DestinationSyncMode(stream["config"]["destination_sync_mode"])
+
+            streams_and_configurations.append(
+                AirbyteStreamAndConfiguration(
+                    stream=AirbyteStream(**stream["stream"]), config=AirbyteStreamConfiguration(**stream["config"])
+                )
+            )
+        return AirbyteCatalog(streams_and_configurations)
 
 
 def factory(api_client: airbyte_api_client.ApiClient, workspace_id: str, configuration_path: str) -> Union[Source, Destination, Connection]:
