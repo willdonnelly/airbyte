@@ -5,38 +5,29 @@
 import abc
 import os
 import time
-from copy import deepcopy
 from pathlib import Path
-from typing import Any, Callable, Optional, Union
+from typing import Callable, Optional, Union
 
 import airbyte_api_client
 import yaml
 from airbyte_api_client.api import connection_api, destination_api, source_api
 from airbyte_api_client.model.airbyte_catalog import AirbyteCatalog
-from airbyte_api_client.model.airbyte_stream import AirbyteStream
-from airbyte_api_client.model.airbyte_stream_and_configuration import AirbyteStreamAndConfiguration
-from airbyte_api_client.model.airbyte_stream_configuration import AirbyteStreamConfiguration
 from airbyte_api_client.model.connection_create import ConnectionCreate
 from airbyte_api_client.model.connection_id_request_body import ConnectionIdRequestBody
 from airbyte_api_client.model.connection_read import ConnectionRead
-from airbyte_api_client.model.connection_schedule import ConnectionSchedule
-from airbyte_api_client.model.connection_status import ConnectionStatus
 from airbyte_api_client.model.connection_update import ConnectionUpdate
 from airbyte_api_client.model.destination_create import DestinationCreate
 from airbyte_api_client.model.destination_id_request_body import DestinationIdRequestBody
 from airbyte_api_client.model.destination_read import DestinationRead
-from airbyte_api_client.model.destination_sync_mode import DestinationSyncMode
 from airbyte_api_client.model.destination_update import DestinationUpdate
-from airbyte_api_client.model.namespace_definition_type import NamespaceDefinitionType
-from airbyte_api_client.model.resource_requirements import ResourceRequirements
 from airbyte_api_client.model.source_create import SourceCreate
 from airbyte_api_client.model.source_discover_schema_request_body import SourceDiscoverSchemaRequestBody
 from airbyte_api_client.model.source_id_request_body import SourceIdRequestBody
 from airbyte_api_client.model.source_read import SourceRead
 from airbyte_api_client.model.source_update import SourceUpdate
-from airbyte_api_client.model.sync_mode import SyncMode
 from click import ClickException
 
+from .configuration_serializers import AirbyteConnectionConfiguration
 from .diff_helpers import compute_diff, hash_config
 from .yaml_loaders import EnvVarLoader
 
@@ -61,7 +52,7 @@ class ResourceState:
             configuration_path (str): Path to the configuration this state relates to.
             resource_id (str): Id of the resource the state relates to.
             generation_timestamp (int): State generation timestamp.
-            configuration_hash (str): Checksum of the configuration file.
+            configuration_hash (str): Hash of the loaded configuration file.
         """
         self.configuration_path = configuration_path
         self.resource_id = resource_id
@@ -83,19 +74,18 @@ class ResourceState:
             yaml.dump(self.as_dict(), state_file)
 
     @classmethod
-    def create(cls, configuration_path: str, configuration: dict, resource_id: str) -> "ResourceState":
+    def create(cls, configuration_path: str, configuration_hash: str, resource_id: str) -> "ResourceState":
         """Create a state for a resource configuration.
 
         Args:
             configuration_path (str): Path to the YAML file defining the resource.
-            configuration (dict): Configuration object that will be hashed.
+            configuration_hash (str): Hash of the loaded configuration fie.
             resource_id (str): UUID of the resource.
 
         Returns:
             ResourceState: state representing the resource.
         """
         generation_timestamp = int(time.time())
-        configuration_hash = hash_config(configuration)
         state = ResourceState(configuration_path, resource_id, generation_timestamp, configuration_hash)
         state._save()
         return state
@@ -122,6 +112,9 @@ class ResourceState:
 
 class BaseResource(abc.ABC):
     APPLY_PRIORITY = 0  # Priority of the resource during the apply. 0 means the resource is top priority.
+    ConfigurationSerializer = (
+        None  # Declare a configuration serializer class if extra validation can be implemented on the raw configuration.
+    )
 
     @property
     @abc.abstractmethod
@@ -194,31 +187,41 @@ class BaseResource(abc.ABC):
         pass
 
     def __init__(
-        self, api_client: airbyte_api_client.ApiClient, workspace_id: str, local_configuration: dict, configuration_path: str
+        self, api_client: airbyte_api_client.ApiClient, workspace_id: str, raw_configuration: dict, configuration_path: str
     ) -> None:
         """Create a BaseResource object.
 
         Args:
             api_client (airbyte_api_client.ApiClient): the Airbyte API client.
             workspace_id (str): the workspace id.
-            local_configuration (dict): The local configuration describing the resource.
+            raw_configuration (dict): The local configuration describing the resource.
             configuration_path (str): The path to the local configuration describing the resource with YAML.
         """
         self._create_fn = getattr(self.api, self.create_function_name)
         self._update_fn = getattr(self.api, self.update_function_name)
         self._get_fn = getattr(self.api, self.get_function_name)
-        self.workspace_id = workspace_id
-        self.local_configuration = local_configuration
+
         self.configuration_path = configuration_path
+        self.configuration_hash = hash_config(raw_configuration)
+        self.raw_configuration = raw_configuration
+        self.configuration = (
+            self.ConfigurationSerializer(raw_configuration["configuration"])
+            if self.ConfigurationSerializer is not None
+            else raw_configuration["configuration"]
+        )
+        self.state = self._get_state_from_file(configuration_path)
+
         self.api_instance = self.api(api_client)
-        self.state = self._get_state_from_file()
-        self.local_file_changed = True if self.state is None else hash_config(self.local_configuration) != self.state.configuration_hash
+        self.workspace_id = workspace_id
+        self.resource_name = raw_configuration["resource_name"]
+
+        self.local_file_changed = True if self.state is None else self.configuration_hash != self.state.configuration_hash
 
     @property
     def remote_resource(self):
         return self._get_remote_resource() if self.state else None
 
-    def _get_comparable_configuration(
+    def _get_remote_comparable_configuration(
         self,
     ) -> Union[SourceRead, DestinationRead, dict]:  # pragma: no cover
         """Get the object to which local configuration will be compared to.
@@ -234,25 +237,19 @@ class BaseResource(abc.ABC):
         else:
             return self.remote_resource
 
+    def _get_local_comparable_configuration(
+        self,
+    ) -> dict:  # pragma: no cover
+        """Get the object to which remote configuration will be compared to.
+
+        Returns:
+            dict: The comparable configuration
+        """
+        return self.raw_configuration["configuration"]
+
     @property
     def was_created(self):
         return True if self.remote_resource else False
-
-    def __getattr__(self, name: str) -> Any:
-        """Map attribute of the YAML config to the Resource object.
-
-        Args:
-            name (str): Attribute name
-
-        Raises:
-            AttributeError: Raised if the attributed was not found in the local configuration.
-
-        Returns:
-            [Any]: Attribute value
-        """
-        if name in self.local_configuration:
-            return self.local_configuration.get(name)
-        raise AttributeError(f"{self.__class__.__name__}.{name} is invalid.")
 
     def _get_remote_resource(self) -> Union[SourceRead, DestinationRead, ConnectionRead]:
         """Run search of a resources on the remote Airbyte instance.
@@ -262,13 +259,14 @@ class BaseResource(abc.ABC):
         """
         return self._get_fn(self.api_instance, self.get_payload)
 
-    def _get_state_from_file(self) -> Optional[ResourceState]:
+    @staticmethod
+    def _get_state_from_file(configuration_file: str) -> Optional[ResourceState]:
         """Retrieve a state object from a local YAML file if it exists.
 
         Returns:
             Optional[ResourceState]: the deserialized resource state if YAML file found.
         """
-        expected_state_path = Path(os.path.join(os.path.dirname(self.configuration_path), "state.yaml"))
+        expected_state_path = Path(os.path.join(os.path.dirname(configuration_file), "state.yaml"))
         if expected_state_path.is_file():
             return ResourceState.from_file(expected_state_path)
 
@@ -283,35 +281,32 @@ class BaseResource(abc.ABC):
         """
         if not self.was_created:
             raise NonExistingResourceError("Cannot compute diff with a non existing remote resource.")
-        current_config = self.configuration
-        remote_config = self._get_comparable_configuration()
-        diff = compute_diff(remote_config, current_config)
+        local_config = self._get_local_comparable_configuration()
+        remote_config = self._get_remote_comparable_configuration()
+        diff = compute_diff(remote_config, local_config)
         return diff.pretty()
 
     def _create_or_update(
         self,
         operation_fn: Callable,
         payload: Union[SourceCreate, SourceUpdate, DestinationCreate, DestinationUpdate, ConnectionCreate, ConnectionUpdate],
-        _check_return_type: bool = True,
     ) -> Union[SourceRead, DestinationRead]:
         """Wrapper to trigger create or update of remote resource.
 
-        Args:
-            operation_fn (Callable): The API function to run.
-            payload (Union[SourceCreate, SourceUpdate, DestinationCreate, DestinationUpdate]): The payload to send to create or update the resource.
+                Args:
+                    operation_fn (Callable): The API function to run.
+                    payload (Union[SourceCreate, SourceUpdate, DestinationCreate, DestinationUpdate]): The payload to send to create or update the resource.
+        .
+                Raises:
+                    InvalidConfigurationError: Raised if the create or update payload is invalid.
+                    ApiException: Raised in case of other API errors.
 
-        Kwargs:
-            _check_return_type (boolean): Whether to check the types returned in the API agains airbyte-api-client open api spec.
-        Raises:
-            InvalidConfigurationError: Raised if the create or update payload is invalid.
-            ApiException: Raised in case of other API errors.
-
-        Returns:
-            Union[SourceRead, DestinationRead, ConnectionRead]: The created or updated resource.
+                Returns:
+                    Union[SourceRead, DestinationRead, ConnectionRead]: The created or updated resource.
         """
         try:
-            result = operation_fn(self.api_instance, payload, _check_return_type=_check_return_type)
-            return result, ResourceState.create(self.configuration_path, self.local_configuration, result[self.resource_id_field])
+            result = operation_fn(self.api_instance, payload)
+            return result, ResourceState.create(self.configuration_path, self.configuration_hash, result[self.resource_id_field])
         except airbyte_api_client.ApiException as api_error:
             if api_error.status == 422:
                 # This  API response error is really verbose, but it embodies all the details about why the config is not valid.
@@ -360,7 +355,25 @@ class BaseResource(abc.ABC):
         return self.ResourceIdRequestBody(self.resource_id)
 
 
-class Source(BaseResource):
+class SourceAndDestination(BaseResource):
+    @property
+    def definition_id(self):
+        return self.raw_configuration["definition_id"]
+
+    @property
+    def definition_image(self):
+        return self.raw_configuration["definition_image"]
+
+    @property
+    def definition_version(self):
+        return self.raw_configuration["definition_version"]
+
+    def _get_remote_comparable_configuration(self) -> dict:
+        comparable_configuration = super()._get_remote_comparable_configuration()
+        return comparable_configuration.connection_configuration
+
+
+class Source(SourceAndDestination):
 
     api = source_api.SourceApi
     create_function_name = "create_source"
@@ -387,10 +400,6 @@ class Source(BaseResource):
             name=self.resource_name,
         )
 
-    def _get_comparable_configuration(self):
-        comparable_configuration = super()._get_comparable_configuration()
-        return comparable_configuration.connection_configuration
-
     @property
     def source_discover_schema_request_body(self) -> SourceDiscoverSchemaRequestBody:
         """Creates SourceDiscoverSchemaRequestBody from resource id.
@@ -416,8 +425,7 @@ class Source(BaseResource):
         return schema.catalog
 
 
-class Destination(BaseResource):
-
+class Destination(SourceAndDestination):
     api = destination_api.DestinationApi
     create_function_name = "create_destination"
     resource_id_field = "destination_id"
@@ -457,13 +465,10 @@ class Destination(BaseResource):
             name=self.resource_name,
         )
 
-    def _get_comparable_configuration(self) -> DestinationRead:
-        comparable_configuration = super()._get_comparable_configuration()
-        return comparable_configuration.connection_configuration
-
 
 class Connection(BaseResource):
     APPLY_PRIORITY = 1  # Set to 1 to create connection after source or destination.
+    ConfigurationSerializer = AirbyteConnectionConfiguration
     api = connection_api.ConnectionApi
     create_function_name = "create_connection"
     resource_id_field = "connection_id"
@@ -473,18 +478,23 @@ class Connection(BaseResource):
     resource_type = "connection"
 
     @property
-    def status(self) -> ConnectionStatus:
-        return ConnectionStatus(self.local_configuration["configuration"]["status"])
+    def source_id(self):
+        return self.raw_configuration["source_id"]
+
+    @property
+    def destination_id(self):
+        return self.raw_configuration["destination_id"]
 
     @property
     def create_payload(self) -> ConnectionCreate:
         """Defines the payload to create the remote connection.
-        Disable snake case parameter usage with _spec_property_naming=True
 
         Returns:
             ConnectionCreate: The ConnectionCreate model instance
         """
-        return ConnectionCreate(**self.configuration, _check_type=False, _spec_property_naming=True)
+        return ConnectionCreate(
+            name=self.resource_name, source_id=self.source_id, destination_id=self.destination_id, **self.configuration.to_dict()
+        )
 
     @property
     def get_payload(self) -> ConnectionRead:
@@ -502,47 +512,24 @@ class Connection(BaseResource):
         Returns:
             ConnectionUpdate: The DestinationUpdate model instance.
         """
-        return ConnectionUpdate(
-            connection_id=self.resource_id,
-            sync_catalog=self.configured_catalog,
-            status=ConnectionStatus(self.configuration["status"]),
-            namespace_definition=NamespaceDefinitionType(self.configuration["namespace_definition"]),
-            namespace_format=self.configuration["namespace_format"],
-            prefix=self.configuration["prefix"],
-            schedule=ConnectionSchedule(**self.configuration["schedule"]),
-            resource_requirements=ResourceRequirements(**self.configuration["resource_requirements"]),
-        )
+        return ConnectionUpdate(connection_id=self.resource_id, **self.configuration.to_dict())
 
     def create(self) -> dict:
-        return self._create_or_update(
-            self._create_fn, self.create_payload, _check_return_type=False
-        )  # Disable check_return_type as the returned payload does not match the open api spec.
+        return self._create_or_update(self._create_fn, self.create_payload)
 
     def update(self) -> dict:
-        return self._create_or_update(
-            self._update_fn, self.update_payload, _check_return_type=False
-        )  # Disable check_return_type as the returned payload does not match the open api spec.
+        return self._create_or_update(self._update_fn, self.update_payload)
 
-    def _get_comparable_configuration(self) -> dict:
-        keys_to_filter_out = ["connection_id", "operation_ids"]
-        comparable_configuration = super()._get_comparable_configuration()
+    def _get_remote_comparable_configuration(self) -> dict:
+        keys_to_filter_out = [
+            "source_id",
+            "name",
+            "destination_id",
+            "connection_id",
+            "operation_ids",
+        ]  # We do not allow local edition of these keys
+        comparable_configuration = super()._get_remote_comparable_configuration()
         return {k: v for k, v in comparable_configuration.to_dict().items() if k not in keys_to_filter_out}
-
-    @property
-    def configured_catalog(self):
-        streams = deepcopy(self.configuration["sync_catalog"]["streams"])
-        streams_and_configurations = []
-        for stream in streams:
-            stream["stream"]["supported_sync_modes"] = [SyncMode(sm) for sm in stream["stream"]["supported_sync_modes"]]
-            stream["config"]["sync_mode"] = SyncMode(stream["config"]["sync_mode"])
-            stream["config"]["destination_sync_mode"] = DestinationSyncMode(stream["config"]["destination_sync_mode"])
-
-            streams_and_configurations.append(
-                AirbyteStreamAndConfiguration(
-                    stream=AirbyteStream(**stream["stream"]), config=AirbyteStreamConfiguration(**stream["config"])
-                )
-            )
-        return AirbyteCatalog(streams_and_configurations)
 
 
 def factory(api_client: airbyte_api_client.ApiClient, workspace_id: str, configuration_path: str) -> Union[Source, Destination, Connection]:
@@ -560,12 +547,12 @@ def factory(api_client: airbyte_api_client.ApiClient, workspace_id: str, configu
         Union[Source, Destination, Connection]: The resource object created from the YAML config.
     """
     with open(configuration_path, "r") as f:
-        local_configuration = yaml.load(f, EnvVarLoader)
-    if local_configuration["definition_type"] == "source":
-        return Source(api_client, workspace_id, local_configuration, configuration_path)
-    if local_configuration["definition_type"] == "destination":
-        return Destination(api_client, workspace_id, local_configuration, configuration_path)
-    if local_configuration["definition_type"] == "connection":
-        return Connection(api_client, workspace_id, local_configuration, configuration_path)
+        raw_configuration = yaml.load(f, EnvVarLoader)
+    if raw_configuration["definition_type"] == "source":
+        return Source(api_client, workspace_id, raw_configuration, configuration_path)
+    if raw_configuration["definition_type"] == "destination":
+        return Destination(api_client, workspace_id, raw_configuration, configuration_path)
+    if raw_configuration["definition_type"] == "connection":
+        return Connection(api_client, workspace_id, raw_configuration, configuration_path)
     else:
-        raise NotImplementedError(f"Resource {local_configuration['definition_type']} was not yet implemented")
+        raise NotImplementedError(f"Resource {raw_configuration['definition_type']} was not yet implemented")
