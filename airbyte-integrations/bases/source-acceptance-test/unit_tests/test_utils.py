@@ -257,6 +257,8 @@ def test_failed_reading(traceback, container_error, last_line, expected_error):
             )
         )
 
+    print(expected_error)
+    print(exc.value.stderr)
     assert expected_error == exc.value.stderr
 
 

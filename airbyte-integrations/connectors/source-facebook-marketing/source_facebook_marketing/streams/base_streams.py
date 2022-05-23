@@ -63,7 +63,11 @@ class FBMarketingStream(Stream, ABC):
             records.append(response.json())
 
         def failure(response: FacebookResponse):
-            raise RuntimeError(f"Batch request failed with response: {response.body()}")
+            call = response._call
+            relative_url = call.get("relative_url")
+            raise RuntimeError(
+                f"Batch request failed with response: {response.body()}\nresponse headers: {response.headers()}\nerror: {response.error()}\nrelative_url: {relative_url}"
+            )
 
         api_batch: FacebookAdsApiBatch = self._api.api.new_batch()
         for request in pending_requests:
