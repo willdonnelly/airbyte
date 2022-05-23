@@ -25,8 +25,12 @@ class FacebookAPIException(Exception):
     """General class for all API errors"""
 
 
+class FacebookRateLimitException(Exception):
+    """General class for all API errors"""
+
+
 backoff_policy = retry_pattern(backoff.expo, FacebookRequestError, max_tries=5, factor=5)
-#backoff_policy_rate_limit = retry_pattern(backoff.expo, FacebookRateLimitException, factor=5, max_tries=5)
+backoff_policy_rate_limit = retry_pattern(backoff.expo, FacebookRateLimitException, factor=5)
 
 
 class MyFacebookAdsApi(FacebookAdsApi):
@@ -141,6 +145,7 @@ class MyFacebookAdsApi(FacebookAdsApi):
             )
 
     @backoff_policy
+    @backoff_policy_rate_limit
     def call(
         self,
         method,
