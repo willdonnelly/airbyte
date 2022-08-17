@@ -105,19 +105,25 @@ class SourceHubspot(AbstractSource):
             EngagementsMeetings(**common_params),
             EngagementsNotes(**common_params),
             EngagementsTasks(**common_params),
-            FeedbackSubmissions(**common_params),
             Forms(**common_params),
             FormSubmissions(**common_params),
             LineItems(**common_params),
-            MarketingEmails(**common_params),
             Owners(**common_params),
             Products(**common_params),
             PropertyHistory(**common_params),
             SubscriptionChanges(**common_params),
             Tickets(**common_params),
             TicketPipelines(**common_params),
-            Workflows(**common_params),
         ]
+
+        if config.get("subscription_type", "starter") == "pro":
+            pro_streams = [
+                FeedbackSubmissions(**common_params),
+                MarketingEmails(**common_params),
+                Workflows(**common_params),
+            ]
+            streams.extend(pro_streams)
+
 
         credentials_title = credentials.get("credentials_title")
         if credentials_title == API_KEY_CREDENTIALS:
