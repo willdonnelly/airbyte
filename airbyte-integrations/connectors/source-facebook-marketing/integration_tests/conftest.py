@@ -16,7 +16,7 @@ def config_fixture():
 
 @pytest.fixture(scope="session", name="config_with_wrong_token")
 def config_with_wrong_token_fixture(config):
-    return {**config, "access_token": "WRONG_TOKEN"}
+    return {**config, "credentials": {"access_token": "WRONG_TOKEN"}}
 
 
 @pytest.fixture(scope="session", name="config_with_wrong_account")

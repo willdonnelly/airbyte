@@ -23,7 +23,7 @@ def account_id_fixture():
 
 @fixture(scope="session", name="some_config")
 def some_config_fixture(account_id):
-    return {"start_date": "2021-01-23T00:00:00Z", "access_token": "unknown_token"}
+    return {"start_date": "2021-01-23T00:00:00Z", "credentials": {"access_token": "unknown_token"}}
 
 
 @fixture(autouse=True)
@@ -56,7 +56,7 @@ def fb_account_response_fixture(account_id):
 
 @fixture(name="api")
 def api_fixture(some_config, requests_mock, fb_account_response, account_id):
-    api = API(access_token=some_config["access_token"])
+    api = API(access_token=some_config["credentials"]["access_token"])
 
     requests_mock.register_uri("GET", FacebookSession.GRAPH + f"/{FB_API_VERSION}/me/adaccounts", [fb_account_response])
     requests_mock.register_uri("GET", FacebookSession.GRAPH + f"/{FB_API_VERSION}/act_{account_id}/", [fb_account_response])

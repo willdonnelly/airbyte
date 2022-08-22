@@ -5,7 +5,7 @@
 import logging
 from datetime import datetime
 from enum import Enum
-from typing import List, Optional
+from typing import List, Optional, Union
 
 import pendulum
 from airbyte_cdk.sources.config import BaseConfig
@@ -80,6 +80,49 @@ class InsightConfig(BaseModel):
     )
 
 
+class OAuthCredentialConfig(BaseConfig):
+    """OAuth Credential config"""
+
+    class Config:
+        title = "Facebook OAuth"
+
+    auth_type: str = Field(title="Authentication Method", order=0, default="oauth")
+
+    client_id: str = Field(
+        title="Client ID",
+        order=1,
+        airbyte_secret=True,
+    )
+
+    client_secret: str = Field(
+        title="Client Secret",
+        order=2,
+        airbyte_secret=True,
+    )
+
+    access_token: str = Field(
+        title="Access Token",
+        order=3,
+        airbyte_secret=True,
+    )
+
+
+class AccessTokenCredentialConfig(BaseConfig):
+    """Access Token Credential config"""
+
+    class Config:
+        title = "Access Token"
+
+    auth_type: str = Field(title="Authentication Method", order=0, default="access_token")
+
+    access_token: str = Field(
+        title="Access Token",
+        order=1,
+        description=("The value of the access token generated. " "See the docs for more information: https://go.estuary.dev/OzUqlE"),
+        airbyte_secret=True,
+    )
+
+
 class ConnectorConfig(BaseConfig):
     """Connector config"""
 
@@ -108,11 +151,8 @@ class ConnectorConfig(BaseConfig):
         default_factory=pendulum.now,
     )
 
-    access_token: str = Field(
-        title="Access Token",
-        order=3,
-        description=("The value of the access token generated. " "See the docs for more information: https://go.estuary.dev/OzUqlE"),
-        airbyte_secret=True,
+    credentials: Union[OAuthCredentialConfig, AccessTokenCredentialConfig] = Field(
+        title="Credentials", order=3, description="Credentials for accessing your Facebook account"
     )
 
     include_deleted: bool = Field(

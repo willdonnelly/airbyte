@@ -45,7 +45,7 @@ class SourceFacebookMarketing(AbstractSource):
         if pendulum.instance(config.end_date) < pendulum.instance(config.start_date):
             raise ValueError("end_date must be equal or after start_date.")
         try:
-            api = API(access_token=config.access_token)
+            api = API(access_token=config.credentials.access_token)
             logger.info(f"Select accounts {api.accounts}")
             return True, None
         except requests.exceptions.RequestException as e:
@@ -58,7 +58,7 @@ class SourceFacebookMarketing(AbstractSource):
         :return: list of the stream instances
         """
         config: ConnectorConfig = ConnectorConfig.parse_obj(config)
-        api = API(access_token=config.access_token)
+        api = API(access_token=config.credentials.access_token)
 
         insights_args = dict(
             api=api,
@@ -132,6 +132,14 @@ class SourceFacebookMarketing(AbstractSource):
             supportsIncremental=True,
             supported_destination_sync_modes=[DestinationSyncMode.append],
             connectionSpecification=ConnectorConfig.schema(),
+            authSpecification={
+                "provider": "facebook",
+                "authUrlTemplate": "https://www.facebook.com/v14.0/dialog/oauth??client_id={{ client_id }}&redirect_uri={{ redirect_uri }}&state={{ state }}",
+                "accessTokenUrlTemplate": "https://graph.facebook.com/v14.0/oauth/access_token?client_id={{ urlencode client_id }}&client_secret={{ urlencode client_secret }}&redirect_uri={{ urlencode redirect_uri }}&code={{ urlencode code }}",
+                "accessTokenMethod": "GET",
+                "accessTokenHeaders": "{\"accept\": \"application/json\"}",
+                "accessTokenResponseMap": "{\"refresh_token\": \"/refresh_token\", \"scope\": \"/scope\", \"token_type\": \"/token_type\"}"
+            }
         )
 
     def _update_insights_streams(self, insights: List[InsightConfig], default_args, streams) -> List[Type[Stream]]:

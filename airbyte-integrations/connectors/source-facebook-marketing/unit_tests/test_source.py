@@ -12,7 +12,7 @@ from source_facebook_marketing.spec import ConnectorConfig
 @pytest.fixture(name="config")
 def config_fixture():
     config = {
-        "access_token": "TOKEN",
+        "credentials": {"access_token": "TOKEN"},
         "start_date": "2019-10-10T00:00:00",
         "end_date": "2020-10-10T00:00:00",
     }
