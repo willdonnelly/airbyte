@@ -10,11 +10,13 @@ WORKDIR $WORKDIR
 COPY $CODE_PATH ./$CODE_PATH
 COPY setup.py ./
 COPY main.py ./
+COPY spec.patch.json ./
+COPY documentation_url.patch.json ./
 
 RUN pip install .
 
 ENV AIRBYTE_ENTRYPOINT "python /airbyte/integration_code/main.py"
-COPY --from=ghcr.io/estuary/airbyte-to-flow:dev /airbyte-to-flow ./airbyte-to-flow
+COPY --from=ghcr.io/estuary/airbyte-to-flow:2e0e310 /airbyte-to-flow ./airbyte-to-flow
 ENTRYPOINT ["/airbyte/integration_code/airbyte-to-flow", "--connector-entrypoint", "python /airbyte/integration_code/main.py"]
 
 LABEL io.airbyte.version=v1
